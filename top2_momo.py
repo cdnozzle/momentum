@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sun Nov 23 06:26:13 2025
+Created on Sun Nov 23 05:55:48 2025
 
 @author: cdnoz
 """
@@ -9,7 +9,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
 
@@ -21,7 +20,7 @@ st.title("Quarterly Volatility-Adjusted Rotation Strategy (Top 2)")
 st.sidebar.header("Data Settings")
 api_key = st.sidebar.text_input("Enter EODHD API Token", type="password", help="Get your key from https://eodhd.com/")
 
-TICKERS = ['XLF', 'QQQ', 'XLU', 'XLE', 'GLD', 'TLT', 'FXI', 'INDA', 'EWZ','XLU','EUFN','KRE','EWY']
+TICKERS = ['XLF', 'QQQ', 'XLU', 'XLE', 'GLD', 'TLT', 'FXI', 'INDA', 'EWZ','VGK','EUFN','VTV','EEM']
 BENCHMARK_SYMBOL = 'GSPC' # EODHD typically uses GSPC.INDX
 BENCHMARK_LABEL = 'S&P 500'
 
