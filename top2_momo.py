@@ -20,7 +20,8 @@ st.title("Quarterly Volatility-Adjusted Rotation Strategy (Top 2)")
 st.sidebar.header("Data Settings")
 api_key = st.sidebar.text_input("Enter EODHD API Token", type="password", help="Get your key from https://eodhd.com/")
 
-TICKERS = ['XLF', 'QQQ', 'XLU', 'XLE', 'GLD', 'TLT', 'FXI', 'INDA', 'EWZ','VGK','EUFN','VTV','EEM','EWY','EWT','KWEB']
+#TICKERS = ['XLF', 'QQQ', 'XLU', 'XLE', 'GLD', 'TLT', 'FXI', 'INDA', 'EWZ','VGK','EUFN','VTV','EEM','EWY','EWT','KWEB']
+TICKERS = ['EWA','EWO','EWK','EWC','EDEN','EFNL','EWQ','EWG','EWH','EIRL','EIS','EWI','EWJ','EWN','ENZL','ENOR','EWS','EWP','EWD','EWL','EWU','SPY','QQQ']
 BENCHMARK_SYMBOL = 'GSPC' # EODHD typically uses GSPC.INDX
 BENCHMARK_LABEL = 'S&P 500'
 
@@ -345,6 +346,7 @@ else:
                 st.dataframe(log_display.sort_values('Date', ascending=False), height=400, use_container_width=True)
     else:
         st.error("No data returned. Please check your API key and try again.")
+
 
 
 
