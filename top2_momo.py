@@ -1,358 +1,278 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Nov 23 05:55:48 2025
-
-@author: cdnoz
-"""
-
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
 import requests
-from datetime import datetime, timedelta
+import datetime
+from dateutil.relativedelta import relativedelta
+import plotly.express as px
+import plotly.graph_objects as go
 
-# --- Configuration ---
-st.set_page_config(page_title="Top 2 ETF Rotation Backtest", layout="wide")
-st.title("Quarterly Volatility-Adjusted Rotation Strategy (Top 2)")
+# Set page config
+st.set_page_config(page_title="ETF Momentum Rebalancer", layout="wide")
 
-# Sidebar for API Key
-st.sidebar.header("Data Settings")
-api_key = st.sidebar.text_input("Enter EODHD API Token", type="password", help="Get your key from https://eodhd.com/")
+st.title("ETF Momentum Rebalancing Strategy")
+st.markdown("""
+This tool backtests a momentum strategy that rebalances every **6 months** based on the **last 6 months' returns**.
+It selects the **Top 2** performing ETFs from your list and holds them for the next period.
+""")
 
-#TICKERS = ['XLF', 'QQQ', 'XLU', 'XLE', 'GLD', 'TLT', 'FXI', 'INDA', 'EWZ','VGK','EUFN','VTV','EEM','EWY','EWT','KWEB']
-TICKERS = ['EWA','EWO','EWK','EWC','EDEN','EFNL','EWQ','EWG','EWH','EIRL','EIS','EWI','EWJ','EWN','ENZL','ENOR','EWS','EWP','EWD','EWL','EWU','SPY','QQQ','GLD']
-BENCHMARK_SYMBOL = 'GSPC' # EODHD typically uses GSPC.INDX
-BENCHMARK_LABEL = 'S&P 500'
+# --- Sidebar Inputs ---
+st.sidebar.header("Configuration")
+
+# API Key Input
+api_token = st.sidebar.text_input("EODHD API Token", value="demo", help="Enter your EOD Historical Data API Token. Use 'demo' for testing (limited tickers only).")
+
+# ETF List Input
+default_etfs = "SPY,QQQ,IWM,EEM,TLT,GLD,VNQ,LQD"
+etf_input = st.sidebar.text_area("ETF Tickers (comma separated)", value=default_etfs, height=100)
+tickers = [t.strip().upper() for t in etf_input.split(",") if t.strip()]
+
+# Date Range
+end_date = datetime.date.today()
+start_date = end_date - relativedelta(years=20)
+
+run_backtest = st.sidebar.button("Run Backtest", type="primary")
 
 # --- Helper Functions ---
+
 @st.cache_data(ttl=3600)
-def fetch_data_eod(api_token, tickers, benchmark_sym, period_years=25):
-    """
-    Fetches historical data from EOD Historical Data API.
-    Fetched 25 years to ensure 20 years of clean backtest data.
-    """
-    if not api_token:
-        return pd.DataFrame()
-
-    start_date = (datetime.now() - timedelta(days=period_years*365)).strftime('%Y-%m-%d')
-    data_dict = {}
-    
-    progress_bar = st.progress(0)
-    total_tickers = len(tickers) + 1
-    
-    # 1. Fetch ETFs
-    for i, t in enumerate(tickers):
-        # Construct EODHD URL for US ETFs
-        url = f'https://eodhd.com/api/eod/{t}.US'
-        params = {
-            'api_token': api_token,
-            'fmt': 'json',
-            'from': start_date,
-            'period': 'd'
-        }
-        
-        try:
-            r = requests.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            
-            if isinstance(data, list) and len(data) > 0:
-                df = pd.DataFrame(data)
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                # Use adjusted_close for total return calculations
-                data_dict[t] = df['adjusted_close'].astype(float)
-        except Exception as e:
-            st.error(f"Error fetching {t}: {e}")
-            
-        progress_bar.progress((i + 1) / total_tickers)
-
-    # 2. Fetch Benchmark (GSPC.INDX)
-    url_bench = f'https://eodhd.com/api/eod/{benchmark_sym}.INDX'
-    params_bench = {
+def fetch_historical_data(symbol, api_token, start, end):
+    """Fetches historical adjusted close data from EODHD."""
+    url = f"https://eodhd.com/api/eod/{symbol}"
+    params = {
         'api_token': api_token,
         'fmt': 'json',
-        'from': start_date,
+        'from': start.strftime('%Y-%m-%d'),
+        'to': end.strftime('%Y-%m-%d'),
         'period': 'd'
     }
     
     try:
-        r_b = requests.get(url_bench, params=params_bench)
-        r_b.raise_for_status()
-        data_b = r_b.json()
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
         
-        if isinstance(data_b, list) and len(data_b) > 0:
-            df_b = pd.DataFrame(data_b)
-            df_b['date'] = pd.to_datetime(df_b['date'])
-            df_b.set_index('date', inplace=True)
-            data_dict[BENCHMARK_LABEL] = df_b['adjusted_close'].astype(float)
-    except Exception as e:
-        st.warning(f"Could not fetch benchmark {benchmark_sym}: {e}")
-
-    progress_bar.progress(1.0)
-    
-    # Combine into a single DataFrame
-    combined_df = pd.DataFrame(data_dict)
-    combined_df.sort_index(inplace=True)
-    combined_df.ffill(inplace=True) # Forward fill missing data
-    return combined_df
-
-def calculate_metrics(prices):
-    """
-    Calculates annualized return, volatility, and 'Sharpe' (Return/Vol)
-    based on the last 252 trading days.
-    """
-    if len(prices) < 2:
-        return 0
-        
-    daily_rets = prices.pct_change().dropna()
-    
-    # Annualized Return (CAGR approximation for the window)
-    total_ret = (prices.iloc[-1] / prices.iloc[0]) - 1
-    # Simple annualized return for ranking
-    ann_ret = total_ret 
-    
-    # Annualized Volatility
-    ann_vol = daily_rets.std() * np.sqrt(252)
-    
-    # Volatility Adjusted Return
-    if ann_vol == 0:
-        return 0
-    return ann_ret / ann_vol
-
-def run_backtest(data):
-    """
-    Simulates the strategy selecting TOP 2 ETFs.
-    """
-    # Resample to business quarter end
-    quarterly_dates = data.resample('Q').last().index
-    
-    history = []
-    
-    # Start 1 year after the first data point
-    start_index = 0
-    for i, date in enumerate(quarterly_dates):
-        if date > data.index[0] + timedelta(days=365):
-            start_index = i
-            break
+        if not data or not isinstance(data, list):
+            return None
             
-    portfolio_value = 100.0
-    benchmark_value = 100.0
-    daily_curve = []
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        
+        # Use adjusted_close if available, else close
+        if 'adjusted_close' in df.columns:
+            return df['adjusted_close']
+        else:
+            return df['close']
+    except Exception as e:
+        st.error(f"Error fetching {symbol}: {e}")
+        return None
+
+def calculate_momentum_strategy(prices_df, top_n=2):
+    """
+    Executes the rebalancing strategy.
     
-    # Track holdings string for display
-    current_holdings_str = 'Cash'
+    Logic:
+    1. Resample to Monthly to find month-ends.
+    2. Filter for 6-month intervals (June/Dec or similar depending on start).
+    3. Calculate 6-month lookback returns.
+    4. Select Top N.
+    5. Construct daily portfolio returns.
+    """
     
-    # Iterate through quarters
-    for i in range(start_index, len(quarterly_dates) - 1):
-        curr_date = quarterly_dates[i]
-        next_date = quarterly_dates[i+1]
+    # Resample to business month end to get clean rebalance dates
+    monthly_prices = prices_df.resample('ME').last()
+    
+    # Calculate 6-month returns for ranking
+    lookback_returns = monthly_prices.pct_change(6)
+    
+    # Initialize portfolio tracking
+    portfolio_daily_returns = pd.Series(0.0, index=prices_df.index)
+    allocations = pd.DataFrame(index=lookback_returns.index, columns=prices_df.columns)
+    
+    # Track rebalance events for display
+    rebalance_log = []
+    
+    # Determine rebalance dates: Every 6 months starting from the first valid lookback
+    # We skip the first 6 months as we need data to calculate momentum
+    valid_dates = lookback_returns.dropna(how='all').index
+    
+    # We will rebalance on these dates
+    # Filter to ensure 6 month gaps roughly
+    rebalance_dates = []
+    if len(valid_dates) > 0:
+        current = valid_dates[0]
+        while current <= valid_dates[-1]:
+            rebalance_dates.append(current)
+            current += relativedelta(months=6)
+            
+    # Iterate through time
+    # For each period between rebalance_date[i] and rebalance_date[i+1]
+    
+    current_holdings = []
+    
+    for i in range(len(rebalance_dates)):
+        date = rebalance_dates[i]
         
-        # 1. Lookback Window: 1 Year ending on current rebalance date
-        lookback_start = curr_date - timedelta(days=365)
-        
-        # Get slice of data for ranking
-        window_data = data.loc[lookback_start:curr_date, TICKERS]
-        
-        scores = {}
-        for ticker in TICKERS:
-            if ticker not in window_data.columns:
-                scores[ticker] = -np.inf
+        # 1. Selection Step: Get returns up to this date
+        if date not in lookback_returns.index:
+            # Fallback if specific date missing, find nearest previous
+            try:
+                idx = lookback_returns.index.get_indexer([date], method='ffill')[0]
+                date = lookback_returns.index[idx]
+            except:
                 continue
                 
-            ticker_prices = window_data[ticker].dropna()
-            if len(ticker_prices) > 200: 
-                scores[ticker] = calculate_metrics(ticker_prices)
-            else:
-                scores[ticker] = -np.inf
+        # Get momentum scores (returns) for this date
+        scores = lookback_returns.loc[date]
         
-        # Select Top 2 Winners
-        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        # Filter out invalid scores (-inf)
-        valid_winners = [x[0] for x in sorted_scores if x[1] > -1000]
+        # Rank and select Top N, ignoring NaNs (assets not yet listed)
+        valid_scores = scores.dropna()
+        if valid_scores.empty:
+            current_holdings = []
+        else:
+            top_performers = valid_scores.nlargest(top_n).index.tolist()
+            current_holdings = top_performers
         
-        selected_tickers = valid_winners[:2]
-        
-        # Record selection
-        history.append({
-            'Date': curr_date,
-            'Selected': ", ".join(selected_tickers),
-            'Top1_Score': scores[selected_tickers[0]] if len(selected_tickers) > 0 else 0,
-            'Previous_Holdings': current_holdings_str
+        # Log decision
+        rebalance_log.append({
+            'Date': date.date(),
+            'Selected': ", ".join(current_holdings),
+            'Returns_Last_6m': [f"{scores[t]:.1%}" for t in current_holdings]
         })
         
-        # 2. Simulate Performance for the NEXT Quarter
-        # Setup data for simulation
-        cols_needed = selected_tickers[:]
-        if BENCHMARK_LABEL in data.columns:
-            cols_needed.append(BENCHMARK_LABEL)
-            
-        period_data = data.loc[curr_date:next_date, cols_needed]
+        # 2. Performance Step: Apply holdings to the *next* period
+        # Period start: day after rebalance date
+        # Period end: next rebalance date
         
-        if len(period_data) > 0 and len(selected_tickers) > 0:
-            # Prepare returns dataframe
-            # We calculate value of each "pocket" of the portfolio separately to allow drift
-            
-            # Init weights (Equal Weight)
-            num_assets = len(selected_tickers)
-            pocket_value = portfolio_value / num_assets
-            pockets = {t: pocket_value for t in selected_tickers}
-            
-            period_returns = period_data.pct_change().fillna(0)
-            
-            for day, row in period_returns.iterrows():
-                # Update Strategy Pockets
-                daily_total = 0
-                for t in selected_tickers:
-                    ret = row[t]
-                    pockets[t] *= (1 + ret)
-                    daily_total += pockets[t]
-                
-                portfolio_value = daily_total
-                
-                # Update Benchmark
-                b_ret = row[BENCHMARK_LABEL] if BENCHMARK_LABEL in row else 0
-                benchmark_value *= (1 + b_ret)
-                
-                daily_curve.append({
-                    'Date': day,
-                    'Strategy': portfolio_value,
-                    'Benchmark': benchmark_value,
-                    'Holdings': ", ".join(selected_tickers)
-                })
-        elif len(period_data) > 0:
-            # Fallback if no tickers selected (should be rare/impossible with this universe)
-            # Stay in Cash
-            period_returns = period_data.pct_change().fillna(0)
-            for day, row in period_returns.iterrows():
-                b_ret = row[BENCHMARK_LABEL] if BENCHMARK_LABEL in row else 0
-                benchmark_value *= (1 + b_ret)
-                daily_curve.append({
-                    'Date': day,
-                    'Strategy': portfolio_value,
-                    'Benchmark': benchmark_value,
-                    'Holdings': "Cash"
-                })
-
-        current_holdings_str = ", ".join(selected_tickers)
-
-    return pd.DataFrame(history), pd.DataFrame(daily_curve)
-
-# --- Main App Logic ---
-
-if not api_key:
-    st.warning("Please enter your EODHD API Token in the sidebar to load data.")
-else:
-    with st.spinner('Fetching 20+ years of data from EODHD...'):
-        data = fetch_data_eod(api_key, TICKERS, BENCHMARK_SYMBOL)
-
-    if not data.empty:
-        # 1. Current Allocation Analysis (Live)
-        st.header("📊 Current Allocation Signal (Top 2)")
-        
-        last_date = data.index[-1]
-        one_year_ago = last_date - timedelta(days=365)
-        current_window = data.loc[one_year_ago:last_date, TICKERS]
-        
-        current_metrics = []
-        for t in TICKERS:
-            if t in current_window.columns:
-                prices = current_window[t].dropna()
-                if len(prices) > 200:
-                    ret = (prices.iloc[-1] / prices.iloc[0]) - 1
-                    vol = prices.pct_change().std() * np.sqrt(252)
-                    ratio = ret / vol if vol > 0 else 0
-                    current_metrics.append({
-                        'Ticker': t,
-                        '1Y Return': ret,
-                        '1Y Volatility': vol,
-                        'Vol-Adj Return': ratio
-                    })
-        
-        if current_metrics:
-            df_curr = pd.DataFrame(current_metrics).sort_values('Vol-Adj Return', ascending=False)
-            
-            # Get Top 2
-            top_2 = df_curr.head(2)
-            
-            # Display Top 2 Metrics side-by-side
-            c1, c2 = st.columns(2)
-            
-            if len(top_2) >= 1:
-                w1 = top_2.iloc[0]
-                with c1:
-                    st.info(f"🥇 First Allocation: {w1['Ticker']}")
-                    st.metric("1Y Return", f"{w1['1Y Return']:.1%}", f"Score: {w1['Vol-Adj Return']:.2f}")
-
-            if len(top_2) >= 2:
-                w2 = top_2.iloc[1]
-                with c2:
-                    st.success(f"🥈 Second Allocation: {w2['Ticker']}")
-                    st.metric("1Y Return", f"{w2['1Y Return']:.1%}", f"Score: {w2['Vol-Adj Return']:.2f}")
-
-            with st.expander("See Full Rankings"):
-                st.dataframe(df_curr.style.format({
-                    '1Y Return': '{:.1%}',
-                    '1Y Volatility': '{:.1%}',
-                    'Vol-Adj Return': '{:.2f}'
-                }))
+        start_period = date
+        if i < len(rebalance_dates) - 1:
+            end_period = rebalance_dates[i+1]
         else:
-            st.warning("Not enough data to calculate current metrics.")
+            end_period = prices_df.index[-1]
+            
+        # Get daily returns for this specific period
+        period_mask = (prices_df.index > start_period) & (prices_df.index <= end_period)
+        
+        if not current_holdings:
+            # Cash position if no holdings
+            portfolio_daily_returns.loc[period_mask] = 0.0
+        else:
+            # Equal weight among selected
+            # Calculate mean return of selected assets
+            asset_returns = prices_df.loc[period_mask, current_holdings].pct_change()
+            
+            # Simple average return (rebalanced daily or buy-and-hold logic?)
+            # Standard backtest approximation: Average of daily returns (rebalanced daily assumption)
+            # OR Buy-and-hold over the period. 
+            # For simplicity and robustness in pandas, mean of daily returns is standard for "Equal Weight Portfolio"
+            period_returns = asset_returns.mean(axis=1).fillna(0)
+            portfolio_daily_returns.loc[period_mask] = period_returns
 
-        # 2. Backtest Execution
-        st.divider()
-        st.header(f"📈 20-Year Backtest vs {BENCHMARK_LABEL}")
-        
-        rebalance_log, equity_curve = run_backtest(data)
-        
-        if not equity_curve.empty:
-            start_val = equity_curve.iloc[0]['Strategy']
-            end_val = equity_curve.iloc[-1]['Strategy']
-            total_ret = (end_val / start_val) - 1
-            days = (equity_curve.iloc[-1]['Date'] - equity_curve.iloc[0]['Date']).days
-            cagr = (end_val / start_val) ** (365/days) - 1
-            
-            # Max Drawdown
-            equity_curve['Peak'] = equity_curve['Strategy'].cummax()
-            equity_curve['Drawdown'] = (equity_curve['Strategy'] - equity_curve['Peak']) / equity_curve['Peak']
-            max_dd = equity_curve['Drawdown'].min()
-            
-            # Benchmark Stats
-            b_start = equity_curve.iloc[0]['Benchmark']
-            b_end = equity_curve.iloc[-1]['Benchmark']
-            b_total_ret = (b_end / b_start) - 1
-            b_cagr = (b_end / b_start) ** (365/days) - 1
-            
-            # Stats Display
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("Strategy Total Return", f"{total_ret:.1%}")
-            kpi2.metric(f"{BENCHMARK_LABEL} Total Return", f"{b_total_ret:.1%}")
-            kpi3.metric("Strategy CAGR", f"{cagr:.1%}")
-            kpi4.metric("Max Drawdown", f"{max_dd:.1%}")
-            
-            # Plotting
-            fig = px.line(equity_curve, x='Date', y=['Strategy', 'Benchmark'], 
-                          title=f"Equity Curve (20 Years): Top 2 Rotation vs {BENCHMARK_LABEL}",
-                          color_discrete_map={'Strategy': '#00CC96', 'Benchmark': '#636EFA'})
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # 3. Holding History
-            st.subheader("📜 Quarterly Rebalance Log")
-            
-            if not rebalance_log.empty:
-                log_display = rebalance_log[['Date', 'Selected']].copy()
-                log_display['Date'] = log_display['Date'].dt.date
-                st.dataframe(log_display.sort_values('Date', ascending=False), height=400, use_container_width=True)
+    return portfolio_daily_returns, pd.DataFrame(rebalance_log)
+
+# --- Main Application Logic ---
+
+if run_backtest:
+    if not api_token:
+        st.error("Please enter an API Token.")
     else:
-        st.error("No data returned. Please check your API key and try again.")
+        with st.spinner("Fetching data and crunching numbers..."):
+            # 1. Fetch Data
+            price_data = {}
+            progress_bar = st.progress(0)
+            
+            for idx, ticker in enumerate(tickers):
+                df_col = fetch_historical_data(ticker, api_token, start_date, end_date)
+                if df_col is not None:
+                    price_data[ticker] = df_col
+                progress_bar.progress((idx + 1) / len(tickers))
+            
+            if not price_data:
+                st.error("No data fetched. Check your API token and ticker symbols.")
+            else:
+                # Combine into one DataFrame
+                prices_df = pd.DataFrame(price_data)
+                prices_df.sort_index(inplace=True)
+                prices_df.ffill(inplace=True) # Fill missing days (holidays etc)
+                
+                # 2. Run Strategy
+                st.subheader("Backtest Results")
+                
+                # Strategy Returns
+                strat_daily_rets, rebalance_log = calculate_momentum_strategy(prices_df, top_n=2)
+                
+                # Calculate Cumulative Returns
+                strat_cum_rets = (1 + strat_daily_rets).cumprod()
+                
+                # Create a Benchmark (Equal Weight of all provided tickers)
+                benchmark_daily = prices_df.pct_change().mean(axis=1).fillna(0)
+                benchmark_cum = (1 + benchmark_daily).cumprod()
+                
+                # --- Metrics ---
+                total_return = strat_cum_rets.iloc[-1] - 1
+                years = (prices_df.index[-1] - prices_df.index[0]).days / 365.25
+                cagr = (strat_cum_rets.iloc[-1])**(1/years) - 1
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Return", f"{total_return:.2%}")
+                col2.metric("CAGR", f"{cagr:.2%}")
+                
+                # Calculate Max Drawdown
+                rolling_max = strat_cum_rets.cummax()
+                drawdown = strat_cum_rets / rolling_max - 1
+                max_dd = drawdown.min()
+                col3.metric("Max Drawdown", f"{max_dd:.2%}")
 
+                # --- Charts ---
+                chart_df = pd.DataFrame({
+                    "Strategy": strat_cum_rets,
+                    "Equal Weight Benchmark": benchmark_cum
+                })
+                
+                fig = px.line(chart_df, title="Strategy vs Benchmark (Growth of $1)")
+                fig.update_layout(hovermode="x unified", legend_title_text='Portfolio')
+                st.plotly_chart(fig, use_container_width=True)
 
+                # --- Current Signals ---
+                st.divider()
+                st.subheader("Current Signals (Based on latest data)")
+                
+                # Calculate momentum right now to see what we should be holding
+                latest_prices = prices_df.resample('ME').last()
+                if len(latest_prices) >= 7: # Need at least 6 months lookback
+                    last_date = latest_prices.index[-1]
+                    current_mom = latest_prices.pct_change(6).iloc[-1]
+                    
+                    # Create ranking table
+                    mom_df = pd.DataFrame(current_mom).rename(columns={last_date: '6m Return'})
+                    mom_df = mom_df.sort_values('6m Return', ascending=False)
+                    
+                    top_picks = mom_df.head(2)
+                    
+                    st.success(f"**Current Recommendation:** Buy **{', '.join(top_picks.index)}**")
+                    
+                    col_a, col_b = st.columns([1, 2])
+                    with col_a:
+                        st.write("Top 2 Selection:")
+                        st.table(top_picks.style.format("{:.2%}"))
+                    with col_b:
+                        st.write("Full Ranking:")
+                        st.dataframe(mom_df.style.format("{:.2%}"), height=200)
+                else:
+                    st.warning("Not enough recent data to generate current signal.")
 
+                # --- Historical Log ---
+                with st.expander("View Historical Rebalance Log"):
+                    st.dataframe(rebalance_log)
 
-
-
-
-
-
-
+else:
+    st.info("Enter your API Token and click 'Run Backtest' to start.")
+    
+    # Simple instructions for non-technical users
+    st.markdown("""
+    ### How to use:
+    1.  **Get an API Key**: Sign up at [EOD Historical Data](https://eodhd.com/).
+    2.  **Enter Tickers**: Input the ETF symbols you want to screen (e.g., SPY, QQQ, GLD).
+    3.  **Run**: The system will download 20 years of daily data.
+    4.  **Analyze**: See how the strategy of buying winners would have performed.
+    """)
